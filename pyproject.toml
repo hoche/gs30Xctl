@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gs30xctl"
+version = "0.2.0"
+description = "Control NETGEAR GS305E/GS305EP/GS305EPP/GS308E/GS308EP/GS308EPP switches (PoE, 802.1Q VLANs) over their web UI"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["requests>=2.20"]
+keywords = ["netgear", "switch", "poe", "vlan", "gs305e", "gs308e", "gs305ep", "gs308ep"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+gs30xctl = "gs30xctl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
