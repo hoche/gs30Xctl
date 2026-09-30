@@ -1,6 +1,6 @@
 import pytest
 
-from gs30xctl import (MODELS, Switch, UnsupportedFeatureError, detect_model_in_html,
+from gs30xctl import (MODELS, IpSettings, Switch, UnsupportedFeatureError, detect_model_in_html,
                       encrypt_password, get_model, membership_to_labels, normalize_membership)
 from gs30xctl.poe import parse_poe_settings
 
@@ -148,3 +148,60 @@ def test_membership_length_checked_against_model():
     sw = Switch("sw", "pw", model="GS308EP", session=FakeSession("GS308EP"))
     with pytest.raises(ValueError, match="8 entries"):
         sw.set_vlan_membership(10, "U,U,N,N,T")
+
+
+# -- management IP ------------------------------------------------------------
+
+def switch_info_page(dhcp=False, ip="192.168.0.239"):
+    sel = ('<option value="0"{}>Disable</option><option value="1"{}>Enable</option>'
+           .format("" if dhcp else " selected", " selected" if dhcp else ""))
+    return f"""<form method="post" action="/switch_info.cgi">
+    <input type="text" name="switch_name" id="switch_name" value="lab" size="15">
+    <select name="dhcpMode" id="dhcpMode">{sel}</select>
+    <input type="text" name="ip_address" id="ip_address" value="{ip}" size="15">
+    <input type="text" name="subnet_mask" id="subnet_mask" value="255.255.255.0">
+    <input type="text" name="gateway_address" id="gateway_address" value="192.168.0.254">
+    <input type=hidden name='hash' id='hash' value="11364"></form>"""
+
+
+class DroppingSession(FakeSession):
+    """Drops the connection on the IP-change POST, then serves the new address."""
+
+    def request(self, method, url, data=None, headers=None, timeout=None):
+        self.urls = getattr(self, "urls", []) + [url]
+        if (method, url.split("/", 3)[3]) == ("POST", "switch_info.cgi"):
+            import requests
+            self.calls.append((method, "switch_info.cgi", data, headers))
+            self.pages[("GET", "switch_info.cgi")] = FakeResponse(
+                switch_info_page(ip=data["ip_address"]))
+            raise requests.ConnectionError("reset by peer")
+        return super().request(method, url, data, headers, timeout)
+
+
+def test_get_ip_settings():
+    sess = FakeSession("GS305E", {("GET", "switch_info.cgi"): FakeResponse(switch_info_page())})
+    s = Switch("sw", "pw", session=sess).get_ip_settings()
+    assert s == IpSettings(dhcp=False, ip="192.168.0.239", netmask="255.255.255.0",
+                           gateway="192.168.0.254")
+    sess.pages[("GET", "switch_info.cgi")] = FakeResponse(switch_info_page(dhcp=True))
+    assert Switch("sw", "pw", session=sess).get_ip_settings().dhcp
+
+
+def test_set_ip_moves_host_and_verifies():
+    sess = DroppingSession("GS305E", {("GET", "switch_info.cgi"): FakeResponse(switch_info_page())})
+    sw = Switch("192.168.0.239", "pw", session=sess)
+    s = sw.set_ip_settings(ip="192.168.0.240")
+    post = next(c for c in sess.calls if c[:2] == ("POST", "switch_info.cgi"))
+    assert post[2] == {"switch_name": "lab", "dhcpMode": "0", "ip_address": "192.168.0.240",
+                       "subnet_mask": "255.255.255.0", "gateway_address": "192.168.0.254",
+                       "hash": "11364"}
+    assert sw.host == "192.168.0.240" and s.ip == "192.168.0.240"
+    assert sess.urls[-1] == "http://192.168.0.240/switch_info.cgi"
+    assert sess.headers["Origin"] == "http://192.168.0.240"
+
+
+def test_set_ip_rejects_gateway_outside_subnet():
+    sess = FakeSession("GS305E", {("GET", "switch_info.cgi"): FakeResponse(switch_info_page())})
+    with pytest.raises(ValueError, match="not in"):
+        Switch("sw", "pw", session=sess).set_ip_settings(ip="10.0.0.5")
+    assert not any(c[0] == "POST" and c[1] == "switch_info.cgi" for c in sess.calls)

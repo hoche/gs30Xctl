@@ -84,6 +84,17 @@ def build_parser() -> argparse.ArgumentParser:
     pvid_set.add_argument("port", type=int)
     pvid_set.add_argument("vid", type=int)
 
+    ip = sub.add_parser("ip", help="switch management IP address")
+    ip_sub = ip.add_subparsers(dest="ip_command", required=True)
+    ip_sub.add_parser("show", help="show DHCP mode, IP, netmask and gateway")
+    ip_set = ip_sub.add_parser(
+        "set", help="set a static management IP (disables DHCP); unspecified fields are kept")
+    ip_set.add_argument("address", help="new IP address, e.g. 192.168.0.240")
+    ip_set.add_argument("--netmask")
+    ip_set.add_argument("--gateway")
+    ip_sub.add_parser("dhcp", help="enable DHCP (the switch's new address is up to the "
+                                   "DHCP server)")
+
     sub.add_parser(
         "discover",
         help="diagnostic: scan the switch's menu pages for .cgi endpoint names "
@@ -148,6 +159,21 @@ def _dispatch(args, sw: Switch):
             sw.set_port_pvid(args.port, args.vid)
             print(f"Port {args.port}: PVID set to {args.vid}")
 
+    elif args.command == "ip":
+        if args.ip_command == "show":
+            s = sw.get_ip_settings()
+            print(f"DHCP:    {'enabled' if s.dhcp else 'disabled'}")
+            print(f"IP:      {s.ip}\nNetmask: {s.netmask}\nGateway: {s.gateway}")
+        elif args.ip_command == "set":
+            s = sw.set_ip_settings(ip=args.address, netmask=args.netmask,
+                                   gateway=args.gateway, dhcp=False)
+            print(f"Switch now at {s.ip} netmask {s.netmask} gateway {s.gateway}")
+            if sw.host != args.host:
+                print(f"Use --host {sw.host} from now on")
+        elif args.ip_command == "dhcp":
+            sw.set_ip_settings(dhcp=True)
+            print("DHCP enabled; find the switch's new address from your DHCP server")
+
     elif args.command == "discover":
         print(json.dumps(sw.discover_cgi_endpoints(), indent=2))
 
@@ -190,8 +216,10 @@ def main(argv=None) -> int:
         return 1
     finally:
         # Persist whatever session is active so the next invocation can reuse it.
+        if sw.host != args.host:  # management IP changed
+            cache.clear_session(args.host)
         if not args.no_cache and sw.session_id:
-            cache.save_session(args.host, sw.session_id,
+            cache.save_session(sw.host, sw.session_id,
                                sw._model.name if sw._model else None)
     return 0
 

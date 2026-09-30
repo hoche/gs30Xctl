@@ -14,7 +14,7 @@ GS308EPP "Plus" switches (PoE, 802.1Q VLANs, port PVIDs) over their web UI.
             sw.poe_cycle([3])
 """
 
-from .client import Switch, encrypt_password
+from .client import IpSettings, Switch, encrypt_password
 from .exceptions import LoginError, ModelDetectionError, SwitchError, UnsupportedFeatureError
 from .models import MODELS, SwitchModel, detect_model_in_html, get_model
 from .poe import PoePortSetting, PoePortStatus
@@ -27,7 +27,7 @@ __version__ = "0.2.0"
 GS305EPPSwitch = Switch
 
 __all__ = [
-    "Switch", "GS305EPPSwitch", "encrypt_password",
+    "Switch", "GS305EPPSwitch", "encrypt_password", "IpSettings",
     "SwitchError", "LoginError", "ModelDetectionError", "UnsupportedFeatureError",
     "SwitchModel", "MODELS", "get_model", "detect_model_in_html",
     "PoePortStatus", "PoePortSetting",

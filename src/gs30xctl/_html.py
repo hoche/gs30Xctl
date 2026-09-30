@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Tuple
 
 
 def find_hash(html: str) -> str:
@@ -25,6 +25,30 @@ def hidden_value(html_chunk: str, id_or_class: str, by="id") -> str:
         rf'<input\b[^>]*\bvalue=["\']([^"\']*)["\'][^>]*\b{attr}=["\']?{re.escape(id_or_class)}["\']?',
         html_chunk, re.IGNORECASE)
     return m.group(1) if m else ""
+
+
+def input_value(html: str, name: str) -> str:
+    """Value of the <input name=...> with the given name ('' if absent)."""
+    for tag in re.findall(r'<input\b[^>]*>', html, re.IGNORECASE):
+        if re.search(rf'\bname=["\']?{re.escape(name)}["\'\s/>]', tag, re.IGNORECASE):
+            m = re.search(r'\bvalue=["\']([^"\']*)["\']', tag, re.IGNORECASE)
+            return m.group(1) if m else ""
+    return ""
+
+
+def select_options(html: str, name: str) -> List[Tuple[str, str, bool]]:
+    """(value, label, selected) for each <option> of the <select name=...>."""
+    m = re.search(rf'<select\b[^>]*\bname=["\']?{re.escape(name)}["\']?[^>]*>(.*?)</select>',
+                  html, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return []
+    out = []
+    for attrs, label in re.findall(r'<option\b([^>]*)>(.*?)(?=<option\b|$)', m.group(1),
+                                   re.IGNORECASE | re.DOTALL):
+        v = re.search(r'\bvalue=["\']?([^"\'\s>]*)', attrs, re.IGNORECASE)
+        label = strip_tags(re.sub(r'</option>.*', '', label, flags=re.IGNORECASE | re.DOTALL))
+        out.append((v.group(1) if v else label, label, bool(re.search(r'\bselected\b', attrs, re.I))))
+    return out
 
 
 def li_blocks(html: str, css_class: str) -> List[str]:

@@ -11,9 +11,11 @@ open-source `ntgrrc` / `go-netgear` and `netgear-tool` projects.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import requests
@@ -30,6 +32,15 @@ log = logging.getLogger(__name__)
 
 # Older GS108Ev3-derived firmware names the session cookie GS108SID.
 _COOKIE_RE = re.compile(r"\b((?:GS108)?SID)=([^;]+)")
+
+
+@dataclass(frozen=True)
+class IpSettings:
+    """Management IP configuration from switch_info.cgi."""
+    dhcp: bool
+    ip: str
+    netmask: str
+    gateway: str
 
 
 def _special_merge(password: str, seed: str) -> str:
@@ -532,6 +543,90 @@ class Switch:
         self._post("portPVID.cgi", {
             f"port{port - 1}": "checked", "pvid": str(pvid), "hash": _html.find_hash(html)})
 
+    # -- management IP -----------------------------------------------------
+
+    def _dhcp_option(self, html: str, enabled: bool) -> str:
+        """The dhcpMode <option> value meaning enabled/disabled on this firmware."""
+        options = _html.select_options(html, "dhcpMode")
+        want = "enable" if enabled else "disable"
+        for value, label, _sel in options:
+            if label.lower().startswith(want):
+                return value
+        raise SwitchError(f"can't find the DHCP {want} option on switch_info.cgi "
+                          f"(options: {options}); run 'dump switch_info.cgi --full-html'")
+
+    def _parse_ip_settings(self, html: str) -> IpSettings:
+        selected = [value for value, _label, sel in _html.select_options(html, "dhcpMode") if sel]
+        return IpSettings(
+            dhcp=bool(selected) and selected[0] == self._dhcp_option(html, True),
+            ip=_html.input_value(html, "ip_address"),
+            netmask=_html.input_value(html, "subnet_mask"),
+            gateway=_html.input_value(html, "gateway_address"),
+        )
+
+    def get_ip_settings(self) -> IpSettings:
+        """The switch's management IP configuration."""
+        return self._parse_ip_settings(self._get("switch_info.cgi"))
+
+    def set_ip_settings(self, ip: Optional[str] = None, netmask: Optional[str] = None,
+                        gateway: Optional[str] = None, dhcp: Optional[bool] = None,
+                        verify_timeout: float = 20.0) -> Optional[IpSettings]:
+        """
+        Change the management IP configuration. Unspecified fields keep their
+        current values.
+
+        When the static address changes, the switch drops the connection
+        mid-request; this then switches `self.host` to the new address and
+        re-reads the settings from there, returning them. Your host needs a
+        route to the new address, or verification fails with SwitchError.
+
+        Enabling DHCP returns None: the new address is chosen by the DHCP
+        server and can't be verified from here.
+
+        A wrong address or gateway can make the switch unreachable; the only
+        recovery is the reset button.
+        """
+        html = self._get("switch_info.cgi")
+        cur = self._parse_ip_settings(html)
+        new = IpSettings(dhcp=cur.dhcp if dhcp is None else dhcp, ip=ip or cur.ip,
+                         netmask=netmask or cur.netmask, gateway=gateway or cur.gateway)
+        if not new.dhcp:
+            _validate_ip_settings(new)
+        data = {
+            "switch_name": _html.input_value(html, "switch_name"),
+            "dhcpMode": self._dhcp_option(html, new.dhcp),
+            "ip_address": new.ip,
+            "subnet_mask": new.netmask,
+            "gateway_address": new.gateway,
+            "hash": _html.find_hash(html),
+        }
+        moving = new.dhcp != cur.dhcp or new.ip != cur.ip
+        try:
+            self._post("switch_info.cgi", data)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if not moving:
+                raise
+            log.debug("connection dropped while changing IP (expected): %s", e)
+
+        if new.dhcp:
+            return None if moving else self.get_ip_settings()
+        if new.ip != cur.ip:
+            self._set_host(new.ip)
+        deadline = time.time() + verify_timeout
+        while True:
+            try:
+                return self.get_ip_settings()
+            except requests.RequestException as e:
+                if time.time() >= deadline:
+                    raise SwitchError(f"IP change sent, but the switch isn't answering at "
+                                      f"{new.ip}: {e}") from e
+                time.sleep(2)
+
+    def _set_host(self, host: str):
+        self.host = host
+        self._session.headers.update({"Referer": self._url("index.cgi"),
+                                      "Origin": f"http://{host}"})
+
     # -- diagnostics -------------------------------------------------------
 
     def discover_cgi_endpoints(self) -> Dict[str, object]:
@@ -607,6 +702,16 @@ class Switch:
                               timeout=self.timeout)
         except requests.RequestException:
             pass
+
+
+def _validate_ip_settings(s: IpSettings):
+    try:
+        net = ipaddress.IPv4Network(f"{s.ip}/{s.netmask}", strict=False)
+        gw = ipaddress.IPv4Address(s.gateway)
+    except ValueError as e:
+        raise ValueError(f"invalid IP settings: {e}") from e
+    if s.gateway != "0.0.0.0" and gw not in net:
+        raise ValueError(f"gateway {s.gateway} is not in {net}")
 
 
 def _cgi_links(html: str) -> set:
